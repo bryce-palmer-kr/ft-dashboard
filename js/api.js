@@ -1,10 +1,12 @@
 /**
  * GitHub API wrapper for FT Dashboard
- * Uses Octokit REST + GraphQL for querying esperanto repo data
+ * Uses plain fetch — no Octokit dependency
  */
 
 const OWNER = 'krogertechnology';
 const REPO = 'esperanto';
+const API = 'https://api.github.com';
+const GQL = 'https://api.github.com/graphql';
 const ALLOW_LIST_PROJECT = 266;
 const DISALLOW_LIST_PROJECT = 277;
 
@@ -47,7 +49,7 @@ const WORKFLOWS = {
   },
 };
 
-// Owned test names (LAFing Cow team)
+// Owned test files (LAFing Cow team)
 const OWNED_TEST_FILES = [
   '@kroger/store/kroger-store-details/pw_tests/StoreDetails.func.ts',
   '@kroger/store/kroger-store-tests/pw_tests/StoreRoutes.func.ts',
@@ -56,7 +58,7 @@ const OWNED_TEST_FILES = [
   '@kroger/core/modality-selector-ui/pw_tests/ModalitySelectorV2-auth-delivery.func.ts',
 ];
 
-let octokit = null;
+// ── Token management ──
 
 function getToken() {
   return localStorage.getItem('gh_token');
@@ -74,17 +76,57 @@ function isAuthenticated() {
   return !!getToken();
 }
 
-async function initOctokit() {
+// ── HTTP helpers ──
+
+function headers() {
   const token = getToken();
   if (!token) throw new Error('No token configured');
-  // Use globalThis.Octokit from CDN
-  octokit = new Octokit({ auth: token });
-  return octokit;
+  return {
+    Authorization: `token ${token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
 }
 
-function getOctokit() {
-  if (!octokit) throw new Error('Octokit not initialized. Call initOctokit() first.');
-  return octokit;
+async function ghGet(path) {
+  const res = await fetch(`${API}${path}`, { headers: headers() });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.message || `GitHub API ${res.status}`);
+  }
+  return res.json();
+}
+
+async function ghPost(path, body) {
+  const res = await fetch(`${API}${path}`, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  // 204 = success with no content (dispatches return this)
+  if (res.status === 204) return {};
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.message || `GitHub API ${res.status}`);
+  }
+  return res.json();
+}
+
+async function ghGraphQL(query, variables) {
+  const res = await fetch(GQL, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables }),
+  });
+  const data = await res.json();
+  if (data.errors) {
+    throw new Error(data.errors.map((e) => e.message).join('; '));
+  }
+  return data.data;
+}
+
+async function verifyToken() {
+  return ghGet('/user');
 }
 
 // ── Workflow Runs ──
@@ -93,18 +135,10 @@ async function getWorkflowRuns(workflowKey, { branch, limit = 10 } = {}) {
   const wf = WORKFLOWS[workflowKey];
   if (!wf) throw new Error(`Unknown workflow: ${workflowKey}`);
 
-  const params = {
-    owner: OWNER,
-    repo: REPO,
-    workflow_id: wf.id,
-    per_page: limit,
-  };
-  if (branch) params.branch = branch;
+  let url = `/repos/${OWNER}/${REPO}/actions/workflows/${wf.id}/runs?per_page=${limit}`;
+  if (branch) url += `&branch=${encodeURIComponent(branch)}`;
 
-  const { data } = await getOctokit().request(
-    'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
-    params
-  );
+  const data = await ghGet(url);
 
   return data.workflow_runs.map((run) => ({
     id: run.id,
@@ -130,15 +164,9 @@ async function getLafingcowRuns(limit = 10) {
 // ── Dispatch Workflows ──
 
 async function dispatchLafingcowFTs(ref = 'main') {
-  await getOctokit().request(
-    'POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches',
-    {
-      owner: OWNER,
-      repo: REPO,
-      workflow_id: WORKFLOWS.dispatchFTs.file,
-      ref,
-      inputs: { 'team-config-name': 'lafingcow' },
-    }
+  await ghPost(
+    `/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOWS.dispatchFTs.file}/dispatches`,
+    { ref, inputs: { 'team-config-name': 'lafingcow' } }
   );
   return { success: true, message: 'Dispatched lafingcow FTs on ' + ref };
 }
@@ -152,15 +180,9 @@ async function dispatchByString(grepString, ref = 'main', options = {}) {
     'pw-workers': String(options.workers ?? 5),
   };
 
-  await getOctokit().request(
-    'POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches',
-    {
-      owner: OWNER,
-      repo: REPO,
-      workflow_id: WORKFLOWS.dispatchByString.file,
-      ref,
-      inputs,
-    }
+  await ghPost(
+    `/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOWS.dispatchByString.file}/dispatches`,
+    { ref, inputs }
   );
   return { success: true, message: `Dispatched FTs for "${grepString}" on ${ref}` };
 }
@@ -204,7 +226,7 @@ async function queryProjectItems(projectNumber) {
   let hasNextPage = true;
 
   while (hasNextPage) {
-    const result = await getOctokit().graphql(query, {
+    const result = await ghGraphQL(query, {
       org: OWNER,
       number: projectNumber,
       cursor,
@@ -229,7 +251,6 @@ async function checkAllowListStatus() {
     queryProjectItems(DISALLOW_LIST_PROJECT),
   ]);
 
-  // Extract test titles from project items
   function extractTitles(items) {
     const titles = new Map();
     for (const item of items) {
@@ -249,9 +270,6 @@ async function checkAllowListStatus() {
   const allowTitles = extractTitles(allowItems);
   const disallowTitles = extractTitles(disallowItems);
 
-  // Check each owned test file's tests against the lists
-  // Note: We don't have the actual test names client-side,
-  // so we check the allow list for known test patterns
   const result = {
     allowListTotal: allowTitles.size,
     disallowListTotal: disallowTitles.size,
@@ -260,7 +278,6 @@ async function checkAllowListStatus() {
     ownedMissing: [],
   };
 
-  // Search for tests matching owned file patterns
   const ownedPatterns = [
     'storedetails',
     'storeroutes',
@@ -290,17 +307,8 @@ async function checkAllowListStatus() {
 // ── PRCI Runs (Cross-PR Spike Detection) ──
 
 async function getPRCIRuns(limit = 30) {
-  // Get recent PRCI workflow runs that contain FTs
-  const params = {
-    owner: OWNER,
-    repo: REPO,
-    workflow_id: WORKFLOWS.dispatchFTs.id,
-    per_page: limit,
-  };
-
-  const { data } = await getOctokit().request(
-    'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
-    params
+  const data = await ghGet(
+    `/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOWS.dispatchFTs.id}/runs?per_page=${limit}`
   );
 
   return data.workflow_runs.map((run) => ({
@@ -323,7 +331,7 @@ window.FTApi = {
   setToken,
   clearToken,
   isAuthenticated,
-  initOctokit,
+  verifyToken,
   getWorkflowRuns,
   getLafingcowRuns,
   dispatchLafingcowFTs,

@@ -113,11 +113,7 @@ function setupAuth() {
 
     try {
       FTApi.setToken(token);
-      await FTApi.initOctokit();
-
-      // Verify token works
-      const ok = new Octokit({ auth: token });
-      const { data: user } = await ok.request('GET /user');
+      const user = await FTApi.verifyToken();
       setText('#user-name', user.login);
 
       hide(authSection);
@@ -149,9 +145,7 @@ function setupLogout() {
 
 async function initDashboard() {
   try {
-    await FTApi.initOctokit();
-    const ok = new Octokit({ auth: FTApi.getToken() });
-    const { data: user } = await ok.request('GET /user');
+    const user = await FTApi.verifyToken();
     setText('#user-name', user.login);
   } catch {
     // token expired
