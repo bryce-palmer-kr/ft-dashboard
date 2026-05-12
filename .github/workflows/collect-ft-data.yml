@@ -100,6 +100,7 @@ jobs:
           git push
 
       - name: Check for alerts
+        id: alerts
         env:
           GH_TOKEN: ${{ secrets.ESPERANTO_PAT }}
         run: |
@@ -108,13 +109,142 @@ jobs:
 
           SPIKE=$(jq -r '.crossPrSpikes.spikeDetected' "$DATA")
           MAIN_STATUS=$(jq -r '.mainBranch.latestConclusion' "$DATA")
+          MAIN_PASS=$(jq -r '.mainBranch.passCount' "$DATA")
+          MAIN_FAIL=$(jq -r '.mainBranch.failCount' "$DATA")
+          SPIKE_BRANCHES=$(jq -r '.crossPrSpikes.uniqueBranchesWithFailures' "$DATA")
+          FAILED_24H=$(jq -r '.crossPrSpikes.failedRunsLast24h' "$DATA")
+          LAFINGCOW_STATUS=$(jq -r '.lafingcowDispatches.latestConclusion' "$DATA")
+          LAFINGCOW_TIME=$(jq -r '.lafingcowDispatches.latestTime' "$DATA")
+
+          # Determine if we need to send an alert
+          SEND_ALERT=false
+          ALERT_COLOR="00FF00"
+          ALERT_TITLE="LAFing Cow FT Daily Report"
 
           if [ "$SPIKE" = "true" ]; then
-            echo "::warning::Cross-PR spike detected! Failures across $(jq -r '.crossPrSpikes.uniqueBranchesWithFailures' "$DATA") branches in the last 24h."
+            SEND_ALERT=true
+            ALERT_COLOR="FF0000"
+            ALERT_TITLE="LAFing Cow FT Alert — Cross-PR Spike Detected"
+            echo "::warning::Cross-PR spike detected! Failures across $SPIKE_BRANCHES branches in the last 24h."
           fi
 
           if [ "$MAIN_STATUS" = "failure" ]; then
-            echo "::warning::Latest main-branch FT run FAILED at $(jq -r '.mainBranch.latestTime' "$DATA")"
+            SEND_ALERT=true
+            ALERT_COLOR="FF6600"
+            ALERT_TITLE="LAFing Cow FT Alert — Main Branch Failure"
+            echo "::warning::Latest main-branch FT run FAILED"
           fi
 
+          # Always send daily summary (change to only-on-failure by setting SEND_ALERT logic above)
+          SEND_ALERT=true
+
+          echo "send_alert=$SEND_ALERT" >> $GITHUB_OUTPUT
+          echo "alert_color=$ALERT_COLOR" >> $GITHUB_OUTPUT
+          echo "alert_title=$ALERT_TITLE" >> $GITHUB_OUTPUT
+          echo "main_status=$MAIN_STATUS" >> $GITHUB_OUTPUT
+          echo "main_pass=$MAIN_PASS" >> $GITHUB_OUTPUT
+          echo "main_fail=$MAIN_FAIL" >> $GITHUB_OUTPUT
+          echo "spike=$SPIKE" >> $GITHUB_OUTPUT
+          echo "spike_branches=$SPIKE_BRANCHES" >> $GITHUB_OUTPUT
+          echo "failed_24h=$FAILED_24H" >> $GITHUB_OUTPUT
+          echo "lafingcow_status=$LAFINGCOW_STATUS" >> $GITHUB_OUTPUT
+          echo "lafingcow_time=$LAFINGCOW_TIME" >> $GITHUB_OUTPUT
           echo "Collection complete. Main: $MAIN_STATUS, Spike: $SPIKE"
+
+      - name: Send Teams notification
+        if: steps.alerts.outputs.send_alert == 'true' && secrets.TEAMS_WEBHOOK_URL != ''
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          MAIN_STATUS="${{ steps.alerts.outputs.main_status }}"
+          MAIN_PASS="${{ steps.alerts.outputs.main_pass }}"
+          MAIN_FAIL="${{ steps.alerts.outputs.main_fail }}"
+          SPIKE="${{ steps.alerts.outputs.spike }}"
+          SPIKE_BRANCHES="${{ steps.alerts.outputs.spike_branches }}"
+          FAILED_24H="${{ steps.alerts.outputs.failed_24h }}"
+          LAFINGCOW_STATUS="${{ steps.alerts.outputs.lafingcow_status }}"
+          LAFINGCOW_TIME="${{ steps.alerts.outputs.lafingcow_time }}"
+          COLOR="${{ steps.alerts.outputs.alert_color }}"
+          TITLE="${{ steps.alerts.outputs.alert_title }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          ESPERANTO_ACTIONS="https://github.com/krogertechnology/esperanto/actions/workflows/01-PRCI-dispatchFunctionalTests.yml"
+
+          # Main status emoji
+          if [ "$MAIN_STATUS" = "success" ]; then
+            MAIN_EMOJI="✅"
+          elif [ "$MAIN_STATUS" = "failure" ]; then
+            MAIN_EMOJI="❌"
+          else
+            MAIN_EMOJI="⚪"
+          fi
+
+          # Spike emoji
+          if [ "$SPIKE" = "true" ]; then
+            SPIKE_TEXT="⚠️ **SPIKE** — Failures across $SPIKE_BRANCHES branches ($FAILED_24H failed runs in 24h)"
+          else
+            SPIKE_TEXT="✅ No cross-PR spikes"
+          fi
+
+          # Build Adaptive Card JSON
+          cat > /tmp/teams-card.json <<CARD
+          {
+            "type": "message",
+            "attachments": [
+              {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    {
+                      "type": "TextBlock",
+                      "text": "$TITLE",
+                      "weight": "bolder",
+                      "size": "medium",
+                      "color": "$([ "$COLOR" = "00FF00" ] && echo "good" || echo "attention")"
+                    },
+                    {
+                      "type": "TextBlock",
+                      "text": "$TODAY",
+                      "isSubtle": true,
+                      "spacing": "none"
+                    },
+                    {
+                      "type": "FactSet",
+                      "facts": [
+                        { "title": "Main Branch (last 12 runs)", "value": "$MAIN_EMOJI $MAIN_PASS passed / $MAIN_FAIL failed" },
+                        { "title": "LAFing Cow Dispatch", "value": "$LAFINGCOW_STATUS ($LAFINGCOW_TIME)" },
+                        { "title": "Cross-PR Spikes", "value": "$SPIKE_TEXT" }
+                      ]
+                    }
+                  ],
+                  "actions": [
+                    {
+                      "type": "Action.OpenUrl",
+                      "title": "View Esperanto FT Runs",
+                      "url": "$ESPERANTO_ACTIONS"
+                    },
+                    {
+                      "type": "Action.OpenUrl",
+                      "title": "View Collection Run",
+                      "url": "$RUN_URL"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+          CARD
+
+          # Post to Teams
+          HTTP_STATUS=$(curl -s -o /tmp/teams-response.txt -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/teams-card.json \
+            "${{ secrets.TEAMS_WEBHOOK_URL }}")
+
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            echo "Teams notification sent successfully (HTTP $HTTP_STATUS)"
+          else
+            echo "::warning::Teams notification failed (HTTP $HTTP_STATUS)"
+            cat /tmp/teams-response.txt
+          fi
