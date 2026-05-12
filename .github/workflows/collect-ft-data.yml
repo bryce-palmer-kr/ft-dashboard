@@ -1,0 +1,120 @@
+name: Collect FT Data (Daily)
+
+on:
+  schedule:
+    # 8:53 AM EST weekdays (13:53 UTC)
+    - cron: '53 13 * * 1,2,3,4,5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  OWNER: krogertechnology
+  REPO: esperanto
+
+jobs:
+  collect-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect FT run data
+        env:
+          GH_TOKEN: ${{ secrets.ESPERANTO_PAT }}
+        run: |
+          set -e
+          TODAY=$(date +%Y-%m-%d)
+          echo "Collecting FT data for $TODAY"
+
+          # 1. Fetch recent main-branch FT runs (03-Util, every 2h)
+          echo "Fetching main-branch failure runs..."
+          MAIN_RUNS=$(gh run list \
+            --repo $OWNER/$REPO \
+            --workflow="03-Util-log-ft-failures-against-main.yml" \
+            --limit 12 \
+            --json databaseId,conclusion,createdAt,status,displayTitle 2>/dev/null || echo "[]")
+
+          # 2. Fetch recent lafingcow dispatch runs
+          echo "Fetching lafingcow dispatch runs..."
+          ALL_DISPATCH_RUNS=$(gh run list \
+            --repo $OWNER/$REPO \
+            --workflow="01-PRCI-dispatchFunctionalTests.yml" \
+            --limit 50 \
+            --json databaseId,conclusion,createdAt,status,displayTitle,headBranch,htmlUrl 2>/dev/null || echo "[]")
+
+          LAFINGCOW_RUNS=$(echo "$ALL_DISPATCH_RUNS" | jq '[.[] | select(.displayTitle | test("lafingcow"; "i"))] | .[0:10]')
+
+          # 3. Count PRCI failures across branches (last 24h)
+          echo "Checking for cross-PR spikes..."
+          CUTOFF=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%SZ)
+          FAILED_RUNS=$(echo "$ALL_DISPATCH_RUNS" | jq --arg cutoff "$CUTOFF" \
+            '[.[] | select(.conclusion == "failure" and .createdAt > $cutoff)]')
+          SPIKE_BRANCHES=$(echo "$FAILED_RUNS" | jq '[.[].headBranch] | unique | length')
+
+          # 4. Build summary JSON
+          MAIN_PASS=$(echo "$MAIN_RUNS" | jq '[.[] | select(.conclusion == "success")] | length')
+          MAIN_FAIL=$(echo "$MAIN_RUNS" | jq '[.[] | select(.conclusion == "failure")] | length')
+          MAIN_LATEST=$(echo "$MAIN_RUNS" | jq -r '.[0].conclusion // "unknown"')
+          MAIN_LATEST_TIME=$(echo "$MAIN_RUNS" | jq -r '.[0].createdAt // "unknown"')
+
+          LAFINGCOW_LATEST=$(echo "$LAFINGCOW_RUNS" | jq -r '.[0].conclusion // "none"')
+          LAFINGCOW_LATEST_TIME=$(echo "$LAFINGCOW_RUNS" | jq -r '.[0].createdAt // "none"')
+
+          cat > "data/daily-${TODAY}.json" <<ENDJSON
+          {
+            "date": "$TODAY",
+            "collectedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "mainBranch": {
+              "latestConclusion": "$MAIN_LATEST",
+              "latestTime": "$MAIN_LATEST_TIME",
+              "passCount": $MAIN_PASS,
+              "failCount": $MAIN_FAIL,
+              "runs": $(echo "$MAIN_RUNS" | jq '.[0:10]')
+            },
+            "lafingcowDispatches": {
+              "latestConclusion": "$LAFINGCOW_LATEST",
+              "latestTime": "$LAFINGCOW_LATEST_TIME",
+              "runs": $LAFINGCOW_RUNS
+            },
+            "crossPrSpikes": {
+              "failedRunsLast24h": $(echo "$FAILED_RUNS" | jq 'length'),
+              "uniqueBranchesWithFailures": $SPIKE_BRANCHES,
+              "spikeDetected": $([ "$SPIKE_BRANCHES" -ge 3 ] && echo "true" || echo "false")
+            }
+          }
+          ENDJSON
+
+          echo "Data written to data/daily-${TODAY}.json"
+
+          # Also write latest.json as a symlink-like pointer
+          cp "data/daily-${TODAY}.json" data/latest.json
+
+      - name: Commit and push data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "chore: collect FT data for $(date +%Y-%m-%d)"
+          git push
+
+      - name: Check for alerts
+        env:
+          GH_TOKEN: ${{ secrets.ESPERANTO_PAT }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          DATA="data/daily-${TODAY}.json"
+
+          SPIKE=$(jq -r '.crossPrSpikes.spikeDetected' "$DATA")
+          MAIN_STATUS=$(jq -r '.mainBranch.latestConclusion' "$DATA")
+
+          if [ "$SPIKE" = "true" ]; then
+            echo "::warning::Cross-PR spike detected! Failures across $(jq -r '.crossPrSpikes.uniqueBranchesWithFailures' "$DATA") branches in the last 24h."
+          fi
+
+          if [ "$MAIN_STATUS" = "failure" ]; then
+            echo "::warning::Latest main-branch FT run FAILED at $(jq -r '.mainBranch.latestTime' "$DATA")"
+          fi
+
+          echo "Collection complete. Main: $MAIN_STATUS, Spike: $SPIKE"

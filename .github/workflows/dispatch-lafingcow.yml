@@ -1,0 +1,31 @@
+name: Dispatch LAFing Cow FTs on Main (Daily)
+
+on:
+  schedule:
+    # 9:07 AM EST weekdays (14:07 UTC) - offset from data collection
+    - cron: '7 14 * * 1,2,3,4,5'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch/ref to run against'
+        required: false
+        default: 'main'
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch lafingcow FTs
+        env:
+          GH_TOKEN: ${{ secrets.ESPERANTO_PAT }}
+        run: |
+          REF="${{ inputs.ref || 'main' }}"
+          echo "Dispatching lafingcow FTs on ref: $REF"
+
+          gh workflow run 01-PRCI-dispatchFunctionalTests.yml \
+            --repo krogertechnology/esperanto \
+            --ref "$REF" \
+            --field team-config-name=lafingcow
+
+          echo "Dispatch sent successfully"
+          echo "View runs at: https://github.com/krogertechnology/esperanto/actions/workflows/01-PRCI-dispatchFunctionalTests.yml"
