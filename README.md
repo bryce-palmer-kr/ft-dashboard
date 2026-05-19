@@ -30,6 +30,8 @@ A GitHub Personal Access Token (PAT) with these scopes:
 - `workflow` -- dispatch workflow runs
 - `read:project` -- read GitHub Projects (allow list / disallow list)
 
+> **Kroger org users:** After generating your token, you must authorize it for the `krogertechnology` org (SAML SSO enforcement). Go to [github.com/settings/tokens](https://github.com/settings/tokens), find your token, click **Configure SSO**, and authorize `krogertechnology`.
+
 ### Run Locally
 
 ```bash
