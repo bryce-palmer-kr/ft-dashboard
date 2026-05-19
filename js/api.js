@@ -56,6 +56,9 @@ const OWNED_TEST_FILES = [
   '@kroger/core/modality-selector-ui/pw_tests/ModalitySelectorV2.func.ts',
   '@kroger/core/modality-selector-ui/pw_tests/ModalitySelector-authenticatedV2.func.ts',
   '@kroger/core/modality-selector-ui/pw_tests/ModalitySelectorV2-auth-delivery.func.ts',
+  '@kroger/core/modality-selector-ui/pw_tests/FirstAddToCart.func.ts',
+  '@kroger/core/modality-selector-ui/pw_tests/FirstAddToCart-accessibility.func.ts',
+  '@kroger/core/modality-selector-ui/pw_tests/ModalitySelector-accessibility.func.ts',
 ];
 
 // ── Token management ──
@@ -154,10 +157,64 @@ async function getWorkflowRuns(workflowKey, { branch, limit = 10 } = {}) {
   }));
 }
 
+// Owned test path fragments — used to check if a failed run contains our tests
+const OWNED_PATH_FRAGMENTS = [
+  'kroger-store-details',
+  'kroger-store-tests',
+  'modality-selector-ui',
+];
+
+async function checkRunForOwnedFailures(runId) {
+  try {
+    const data = await ghGet(
+      `/repos/${OWNER}/${REPO}/actions/runs/${runId}/jobs?per_page=100`
+    );
+    const failedJobs = data.jobs.filter((j) => j.conclusion === 'failure');
+    if (failedJobs.length === 0) return false;
+
+    // Check annotations on each failed job for owned test paths
+    for (const job of failedJobs) {
+      try {
+        const annotations = await ghGet(
+          `/repos/${OWNER}/${REPO}/check-runs/${job.id}/annotations?per_page=30`
+        );
+        for (const ann of annotations) {
+          const msg = (ann.message || '').toLowerCase();
+          if (OWNED_PATH_FRAGMENTS.some((f) => msg.includes(f))) {
+            return true;
+          }
+        }
+      } catch {
+        // Annotation fetch failed — skip this job
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// Owned test file basenames (without .func.ts) for matching dispatchByString run names
+const OWNED_TEST_NAMES = OWNED_TEST_FILES.map((f) =>
+  f.split('/').pop().replace(/\.func\.ts$/, '').toLowerCase()
+);
+
 async function getLafingcowRuns(limit = 10) {
-  const allRuns = await getWorkflowRuns('dispatchFTs', { limit: 50 });
-  return allRuns
-    .filter((r) => r.name.toLowerCase().includes('lafingcow'))
+  const [teamRuns, stringRuns] = await Promise.all([
+    getWorkflowRuns('dispatchFTs', { limit: 50 }),
+    getWorkflowRuns('dispatchByString', { limit: 20 }),
+  ]);
+
+  const lafingcowRuns = teamRuns.filter((r) => r.name.toLowerCase().includes('lafingcow'));
+
+  // Include dispatchByString runs whose grep string matches owned test names
+  const ownedStringRuns = stringRuns.filter((r) => {
+    const name = r.name.toLowerCase();
+    return OWNED_TEST_NAMES.some((t) => name.includes(t));
+  });
+
+  return [...lafingcowRuns, ...ownedStringRuns]
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
     .slice(0, limit);
 }
 
@@ -198,7 +255,7 @@ async function queryProjectItems(projectNumber) {
             pageInfo { hasNextPage endCursor }
             nodes {
               id
-              fieldValues(first: 10) {
+              fieldValues(first: 20) {
                 nodes {
                   ... on ProjectV2ItemFieldTextValue {
                     text
@@ -246,67 +303,109 @@ function normalizeTestName(text) {
 }
 
 async function checkAllowListStatus() {
-  const [allowItems, disallowItems] = await Promise.all([
-    queryProjectItems(ALLOW_LIST_PROJECT),
-    queryProjectItems(DISALLOW_LIST_PROJECT),
-  ]);
+  const allowItems = await queryProjectItems(ALLOW_LIST_PROJECT);
 
-  function extractTitles(items) {
-    const titles = new Map();
-    for (const item of items) {
-      const fields = {};
-      for (const fv of item.fieldValues.nodes) {
-        if (fv?.field?.name && (fv.text || fv.name || fv.date)) {
-          fields[fv.field.name] = fv.text || fv.name || fv.date;
-        }
-      }
-      if (fields.Title) {
-        titles.set(normalizeTestName(fields.Title), fields);
+  const allowAll = [];
+  for (const item of allowItems) {
+    const fields = {};
+    for (const fv of item.fieldValues.nodes) {
+      if (fv?.field?.name && (fv.text || fv.name || fv.date)) {
+        fields[fv.field.name] = fv.text || fv.name || fv.date;
       }
     }
-    return titles;
+    if (fields.Title) {
+      allowAll.push({ title: normalizeTestName(fields.Title), ...fields });
+    }
   }
 
-  const allowTitles = extractTitles(allowItems);
-  const disallowTitles = extractTitles(disallowItems);
+  // Filter by Team Name field — the authoritative owner tag set by CI
+  const TEAM = 'lafingcow';
+  const ownedOnAllow = allowAll.filter((t) => (t['Team Name'] || '').toLowerCase() === TEAM);
 
-  const result = {
-    allowListTotal: allowTitles.size,
-    disallowListTotal: disallowTitles.size,
-    ownedOnAllow: [],
-    ownedOnDisallow: [],
-    ownedMissing: [],
+  return {
+    allowListTotal: allowAll.length,
+    ownedOnAllow,
   };
+}
 
-  const ownedPatterns = [
-    'storedetails',
-    'storeroutes',
-    'store details',
-    'store routes',
-    'modality',
-    'modalityselector',
-    'first add to cart',
-    'firstaddtocart',
-  ];
+async function checkDisallowListStatus() {
+  const disallowItems = await queryProjectItems(DISALLOW_LIST_PROJECT);
 
-  for (const [title, fields] of allowTitles) {
-    if (ownedPatterns.some((p) => title.includes(p))) {
-      result.ownedOnAllow.push({ title, ...fields });
+  const disallowAll = [];
+  for (const item of disallowItems) {
+    const fields = {};
+    for (const fv of item.fieldValues.nodes) {
+      if (fv?.field?.name && (fv.text || fv.name || fv.date)) {
+        fields[fv.field.name] = fv.text || fv.name || fv.date;
+      }
+    }
+    if (fields.Title) {
+      disallowAll.push({ title: normalizeTestName(fields.Title), ...fields });
     }
   }
 
-  for (const [title, fields] of disallowTitles) {
-    if (ownedPatterns.some((p) => title.includes(p))) {
-      result.ownedOnDisallow.push({ title, ...fields });
+  const TEAM = 'lafingcow';
+  const ownedOnDisallow = disallowAll.filter((t) => (t['Team Name'] || '').toLowerCase() === TEAM);
+
+  return {
+    disallowListTotal: disallowAll.length,
+    ownedOnDisallow,
+  };
+}
+
+async function dispatchRestoreWorkflow(testTitle = '') {
+  await ghPost(
+    `/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOWS.restoreToAllowlist.file}/dispatches`,
+    { ref: 'main', inputs: { 'test-description-title': testTitle } }
+  );
+  return { success: true, message: testTitle ? `Triggered restore for "${testTitle}"` : 'Triggered restore for all disallow list tests' };
+}
+
+async function getRestoreRuns(limit = 5) {
+  return getWorkflowRuns('restoreToAllowlist', { limit });
+}
+
+async function getRunFailureDetails(runId, { ownedOnly = false } = {}) {
+  const data = await ghGet(
+    `/repos/${OWNER}/${REPO}/actions/runs/${runId}/jobs?per_page=100`
+  );
+  const failedJobs = data.jobs.filter((j) => j.conclusion === 'failure');
+  if (failedJobs.length === 0) {
+    return { failures: [], totalFailedJobs: 0 };
+  }
+
+  const failures = [];
+  for (const job of failedJobs) {
+    try {
+      const annotations = await ghGet(
+        `/repos/${OWNER}/${REPO}/check-runs/${job.id}/annotations?per_page=30`
+      );
+      for (const ann of annotations) {
+        if (ann.annotation_level !== 'failure') continue;
+        const path = ann.path || '';
+        const msg = ann.message || '';
+        if (ownedOnly && !OWNED_PATH_FRAGMENTS.some((f) => path.toLowerCase().includes(f) || msg.toLowerCase().includes(f))) {
+          continue;
+        }
+        const parts = path.split('/');
+        failures.push({
+          jobName: job.name,
+          testPath: path,
+          testFile: parts[parts.length - 1] || path,
+          message: msg.length > 500 ? msg.slice(0, 500) + '...' : msg,
+        });
+      }
+    } catch {
+      // Annotation fetch failed — skip this job
     }
   }
 
-  return result;
+  return { failures, totalFailedJobs: failedJobs.length };
 }
 
 // ── PRCI Runs (Cross-PR Spike Detection) ──
 
-async function getPRCIRuns(limit = 30) {
+async function getPRCIRuns(limit = 75) {
   const data = await ghGet(
     `/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOWS.dispatchFTs.id}/runs?per_page=${limit}`
   );
@@ -337,5 +436,10 @@ window.FTApi = {
   dispatchLafingcowFTs,
   dispatchByString,
   checkAllowListStatus,
+  checkDisallowListStatus,
+  dispatchRestoreWorkflow,
+  getRestoreRuns,
+  checkRunForOwnedFailures,
+  getRunFailureDetails,
   getPRCIRuns,
 };

@@ -4,12 +4,28 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LAFing Cow FT Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐮</text></svg>" />
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
     .card { @apply bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden; }
     .card-header { @apply px-5 py-4 border-b border-gray-100 flex items-center justify-between; }
     .card-body { @apply p-5; }
+    @keyframes shimmer {
+      0% { background-position: -200px 0; }
+      100% { background-position: 200px 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+      background-size: 200px 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 4px;
+      height: 16px;
+    }
+    .modal-backdrop {
+      background: rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(2px);
+    }
   </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -59,9 +75,15 @@
           <button
             id="refresh-btn"
             class="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1"
+            title="Refresh (r)"
           >
             &#8635; Refresh
           </button>
+          <button
+            id="help-btn"
+            class="w-7 h-7 rounded-full border border-gray-300 text-gray-500 hover:bg-gray-100 text-sm font-bold"
+            title="How to use this dashboard"
+          >?</button>
           <div class="flex items-center gap-2 text-sm text-gray-500">
             <span id="user-name"></span>
             <button id="logout-btn" class="text-gray-400 hover:text-red-500 text-xs">(logout)</button>
@@ -69,6 +91,13 @@
         </div>
       </div>
     </header>
+
+    <!-- Summary Bar -->
+    <div id="summary-bar" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+      <div id="summary-content" class="rounded-lg px-4 py-3 text-sm flex items-center gap-2 bg-gray-100 text-gray-400">
+        Loading health status...
+      </div>
+    </div>
 
     <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
 
@@ -107,9 +136,22 @@
                 <input
                   id="grep-string-input"
                   type="text"
-                  placeholder="describe > test title"
+                  list="grep-presets"
+                  placeholder="Select a suite or type custom..."
                   class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                 />
+                <datalist id="grep-presets">
+                  <option value="Store Details Suite" label="All Store Details">
+                  <option value="Store-Routes Suite" label="All Store Routes">
+                  <option value="Modality Selector Suite" label="All Modality Selector">
+                  <option value="First Add to Cart Suite" label="All First Add to Cart">
+                  <option value="Store Details Suite > Hamilton Township" label="SD: Hamilton Township">
+                  <option value="Store Details Suite > Loveland store - Pickup" label="SD: Loveland Pickup">
+                  <option value="Store Details Suite > Loveland store - Delivery" label="SD: Loveland Delivery">
+                  <option value="Store Details Suite > Mason Montgomery" label="SD: Mason Montgomery">
+                  <option value="Store-Routes Suite > Loveland" label="SR: Loveland">
+                  <option value="Store-Routes Suite > Mason Montgomery" label="SR: Mason Montgomery">
+                </datalist>
                 <button
                   id="dispatch-string-btn"
                   class="bg-gray-800 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition text-sm font-medium"
@@ -203,34 +245,15 @@
         </div>
       </div>
 
-      <!-- Owned Test Files -->
+      <!-- Owned Test Files (dynamic) -->
       <div class="card">
         <div class="card-header">
           <h2 class="font-semibold text-gray-800">Owned Test Files</h2>
           <span class="text-xs text-gray-400">LAFing Cow / How, When, Where</span>
         </div>
         <div class="card-body">
-          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            <div class="p-3 bg-gray-50 rounded-lg">
-              <p class="text-sm font-medium text-gray-700">StoreDetails.func.ts</p>
-              <p class="text-xs text-gray-400">@kroger/store/kroger-store-details</p>
-            </div>
-            <div class="p-3 bg-gray-50 rounded-lg">
-              <p class="text-sm font-medium text-gray-700">StoreRoutes.func.ts</p>
-              <p class="text-xs text-gray-400">@kroger/store/kroger-store-tests</p>
-            </div>
-            <div class="p-3 bg-gray-50 rounded-lg">
-              <p class="text-sm font-medium text-gray-700">ModalitySelectorV2.func.ts</p>
-              <p class="text-xs text-gray-400">@kroger/core/modality-selector-ui</p>
-            </div>
-            <div class="p-3 bg-gray-50 rounded-lg">
-              <p class="text-sm font-medium text-gray-700">ModalitySelector-authenticatedV2.func.ts</p>
-              <p class="text-xs text-gray-400">@kroger/core/modality-selector-ui</p>
-            </div>
-            <div class="p-3 bg-gray-50 rounded-lg">
-              <p class="text-sm font-medium text-gray-700">ModalitySelectorV2-auth-delivery.func.ts</p>
-              <p class="text-xs text-gray-400">@kroger/core/modality-selector-ui</p>
-            </div>
+          <div id="owned-tests-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+            <p class="text-gray-400 text-sm col-span-full">Loading...</p>
           </div>
         </div>
       </div>
@@ -239,9 +262,66 @@
       <footer class="text-center text-xs text-gray-400 py-4">
         LAFing Cow FT Dashboard &middot; Data sourced from
         <a href="https://github.com/krogertechnology/esperanto" class="text-blue-500 hover:underline">esperanto</a>
-        GitHub Actions
+        GitHub Actions &middot; Press <kbd class="px-1 py-0.5 bg-gray-100 rounded text-gray-500 font-mono text-xs">r</kbd> to refresh
       </footer>
     </main>
+  </div>
+
+  <!-- Help Modal -->
+  <div id="help-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white rounded-2xl shadow-xl max-w-lg w-full mx-4 max-h-[85vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white rounded-t-2xl">
+        <h2 class="text-lg font-bold text-gray-800">How to Use This Dashboard</h2>
+        <button id="help-close-btn" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-5 text-sm text-gray-700">
+        <div>
+          <h3 class="font-semibold text-gray-900 mb-1">Morning Check (~9 AM)</h3>
+          <ol class="list-decimal list-inside space-y-1 text-gray-600">
+            <li>Glance at the <strong>summary bar</strong> — green means all clear</li>
+            <li>Check <strong>Main Branch FT Runs</strong> — is main green? Multiple failures = systemic issue</li>
+            <li>Check <strong>Cross-PR Spikes</strong> — failures across 3+ branches = flaky test or infra issue</li>
+            <li>Check <strong>Allow List Status</strong> — any owned tests quarantined? Prioritize fixing them</li>
+          </ol>
+        </div>
+        <div>
+          <h3 class="font-semibold text-gray-900 mb-1">After Fixing a Flaky Test</h3>
+          <ol class="list-decimal list-inside space-y-1 text-gray-600">
+            <li>Use <strong>"Run by Test String"</strong> with the test name to validate 5x</li>
+            <li>Watch the result appear in <strong>LAFing Cow Dispatch Runs</strong></li>
+          </ol>
+        </div>
+        <div>
+          <h3 class="font-semibold text-gray-900 mb-1">Before End of Day</h3>
+          <ol class="list-decimal list-inside space-y-1 text-gray-600">
+            <li>Dispatch a full <strong>"Run LAFing Cow FTs"</strong> for a clean baseline tomorrow</li>
+          </ol>
+        </div>
+        <div>
+          <h3 class="font-semibold text-gray-900 mb-1">When You See a Spike</h3>
+          <ol class="list-decimal list-inside space-y-1 text-gray-600">
+            <li>Expand the failed runs in <strong>Cross-PR Spikes</strong></li>
+            <li>Same test failing across unrelated branches = <strong>flaky on main</strong></li>
+            <li>Failures clustered on one branch = <strong>real breakage from that PR</strong></li>
+          </ol>
+        </div>
+        <div class="pt-2 border-t border-gray-100 text-xs text-gray-400">
+          Keyboard: press <kbd class="px-1 py-0.5 bg-gray-100 rounded font-mono">r</kbd> to refresh &middot;
+          Data auto-refreshes every 5 minutes
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm Modal -->
+  <div id="confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+    <div class="bg-white rounded-xl shadow-xl max-w-sm w-full mx-4 p-6">
+      <p id="confirm-message" class="text-sm text-gray-700 mb-4"></p>
+      <div class="flex gap-3 justify-end">
+        <button id="confirm-cancel-btn" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 font-medium">Cancel</button>
+        <button id="confirm-ok-btn" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium">Dispatch</button>
+      </div>
+    </div>
   </div>
 
   <script src="js/api.js"></script>
