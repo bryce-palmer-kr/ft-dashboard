@@ -1,0 +1,21 @@
+{
+  "date": "2026-05-18",
+  "collectedAt": "2026-05-18T16:41:52Z",
+  "mainBranch": {
+    "latestConclusion": "unknown",
+    "latestTime": "unknown",
+    "passCount": 0,
+    "failCount": 0,
+    "runs": []
+  },
+  "lafingcowDispatches": {
+    "latestConclusion": "none",
+    "latestTime": "none",
+    "runs": []
+  },
+  "crossPrSpikes": {
+    "failedRunsLast24h": 0,
+    "uniqueBranchesWithFailures": 0,
+    "spikeDetected": false
+  }
+}
