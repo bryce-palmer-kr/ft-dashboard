@@ -433,6 +433,11 @@ async function fetchTestHistory() {
   }
 }
 
+async function getTestFailures(runUrl) {
+  const runId = runUrl.split('/').pop();
+  return getRunFailureDetails(runId, { ownedOnly: true });
+}
+
 // ── Export ──
 
 window.FTApi = {
@@ -455,4 +460,5 @@ window.FTApi = {
   getRunFailureDetails,
   getPRCIRuns,
   fetchTestHistory,
+  getTestFailures,
 };

@@ -11,6 +11,7 @@ let allowListData = null;
 let prciFailedRuns = [];
 let testHistoryData = null;
 let countdownInterval = null;
+let _historyBtnCounter = 0;
 let refreshSecondsLeft = 0;
 const REFRESH_INTERVAL_S = 5 * 60;
 const GITHUB_BASE = 'https://github.com/krogertechnology/esperanto';
@@ -628,6 +629,114 @@ function transitionBadge(state) {
   return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${s.cls}">${s.label}</span>`;
 }
 
+function renderTransitionFailures(tr) {
+  if (tr.to !== 'quarantine') return '';
+
+  if (tr.failureDetails && tr.failureDetails.length > 0) {
+    const items = tr.failureDetails.map((f) => `
+      <div class="bg-red-50 border border-red-100 rounded p-2 text-xs">
+        <p class="font-mono text-gray-500 mb-0.5 truncate" title="${escapeHtml(f.testFile)}">${escapeHtml(f.testFile)}</p>
+        <pre class="text-red-700 whitespace-pre-wrap break-words max-h-24 overflow-y-auto">${escapeHtml(f.message)}</pre>
+      </div>
+    `).join('');
+    return `
+      <details class="mt-1 w-full">
+        <summary class="text-xs text-red-400 cursor-pointer hover:text-red-600 select-none">
+          ${tr.failureDetails.length} failure${tr.failureDetails.length !== 1 ? 's' : ''} ▸
+        </summary>
+        <div class="mt-1 space-y-1">${items}</div>
+      </details>
+    `;
+  }
+
+  if (tr.runUrl) {
+    const id = ++_historyBtnCounter;
+    const btnId = `hf-btn-${id}`;
+    const targetId = `hf-${id}`;
+    return `
+      <div class="mt-1 w-full">
+        <button id="${btnId}"
+                data-run-url="${escapeHtml(tr.runUrl)}"
+                data-target="${targetId}"
+                onclick="loadHistoryFailures('${btnId}', '${targetId}')"
+                class="text-xs text-blue-500 hover:text-blue-700 hover:underline">
+          Load failure details&hellip;
+        </button>
+        <div id="${targetId}" class="mt-1"></div>
+      </div>
+    `;
+  }
+
+  return '';
+}
+
+async function loadHistoryFailures(btnId, targetId) {
+  const btn = document.getElementById(btnId);
+  const target = document.getElementById(targetId);
+  if (!btn || !target) return;
+
+  const runUrl = btn.dataset.runUrl;
+  if (!runUrl) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+
+  try {
+    const result = await FTApi.getTestFailures(runUrl);
+    btn.style.display = 'none';
+    if (result.failures.length === 0) {
+      target.innerHTML = '<p class="text-xs text-gray-400 italic">No owned test failures found in this run.</p>';
+    } else {
+      target.innerHTML = result.failures.map((f) => `
+        <div class="bg-red-50 border border-red-100 rounded p-2 text-xs mt-1">
+          <p class="font-mono text-gray-500 mb-0.5 truncate" title="${escapeHtml(f.testPath)}">${escapeHtml(f.testFile)}</p>
+          <pre class="text-red-700 whitespace-pre-wrap break-words max-h-24 overflow-y-auto">${escapeHtml(f.message)}</pre>
+        </div>
+      `).join('');
+    }
+  } catch (err) {
+    btn.textContent = 'Load failure details…';
+    btn.disabled = false;
+    target.innerHTML = `<p class="text-xs text-red-400">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+window.loadHistoryFailures = loadHistoryFailures;
+
+function renderMiniTestHistory(testTitle, history) {
+  if (!history) return '';
+  const normalizedTitle = testTitle.toLowerCase().trim();
+  const testTransitions = [...history.transitions]
+    .filter((tr) => tr.test === normalizedTitle)
+    .reverse();
+
+  if (testTransitions.length === 0) return '';
+
+  return `
+    <details class="mt-1.5">
+      <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600 select-none">
+        History (${testTransitions.length} event${testTransitions.length !== 1 ? 's' : ''})
+      </summary>
+      <div class="mt-1 pl-2 border-l-2 border-gray-100 space-y-2">
+        ${testTransitions.map((tr) => `
+          <div class="text-xs">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-gray-400 shrink-0">${tr.date}</span>
+              ${transitionBadge(tr.from)}
+              <span class="text-gray-400">→</span>
+              ${transitionBadge(tr.to)}
+              ${tr.strikes != null && tr.strikes !== 'null' && tr.strikes !== 'unknown'
+                ? `<span class="text-yellow-600">&#9889; ${tr.strikes}</span>` : ''}
+              ${tr.runUrl
+                ? `<a href="${escapeHtml(tr.runUrl)}" target="_blank" class="text-blue-500 hover:underline ml-auto shrink-0">Run &#8599;</a>` : ''}
+            </div>
+            ${renderTransitionFailures(tr)}
+          </div>
+        `).join('')}
+      </div>
+    </details>
+  `;
+}
+
 function renderTestHistoryPanel(history) {
   if (!history || history.transitions.length === 0) {
     return `
@@ -656,19 +765,22 @@ function renderTestHistoryPanel(history) {
           </div>
           <div class="divide-y divide-gray-50">
             ${transitions.map((tr) => `
-              <div class="px-3 py-2 flex items-center gap-3 flex-wrap text-xs">
-                <span class="text-gray-400 shrink-0">${tr.date}</span>
-                <span class="flex items-center gap-1">
-                  ${transitionBadge(tr.from)}
-                  <span class="text-gray-400">→</span>
-                  ${transitionBadge(tr.to)}
-                </span>
-                ${tr.strikes != null && tr.strikes !== 'null' && tr.strikes !== 'unknown' ? `
-                  <span class="text-yellow-600 font-medium">&#9889; ${tr.strikes} strike${tr.strikes !== '1' ? 's' : ''}</span>
-                ` : ''}
-                ${tr.runUrl ? `
-                  <a href="${escapeHtml(tr.runUrl)}" target="_blank" class="text-blue-600 hover:underline ml-auto">View Run &#8599;</a>
-                ` : ''}
+              <div class="px-3 py-2 text-xs">
+                <div class="flex items-center gap-3 flex-wrap">
+                  <span class="text-gray-400 shrink-0">${tr.date}</span>
+                  <span class="flex items-center gap-1">
+                    ${transitionBadge(tr.from)}
+                    <span class="text-gray-400">→</span>
+                    ${transitionBadge(tr.to)}
+                  </span>
+                  ${tr.strikes != null && tr.strikes !== 'null' && tr.strikes !== 'unknown' ? `
+                    <span class="text-yellow-600 font-medium">&#9889; ${tr.strikes} strike${tr.strikes !== '1' ? 's' : ''}</span>
+                  ` : ''}
+                  ${tr.runUrl ? `
+                    <a href="${escapeHtml(tr.runUrl)}" target="_blank" class="text-blue-600 hover:underline ml-auto shrink-0">View Run &#8599;</a>
+                  ` : ''}
+                </div>
+                ${renderTransitionFailures(tr)}
               </div>
             `).join('')}
           </div>
@@ -683,12 +795,14 @@ function renderTestHistoryPanel(history) {
 async function refreshAllowList() {
   setHTML('#allowlist-content', skeletonBlock());
   try {
-    const [status, disallowStatus, restoreRuns] = await Promise.all([
+    const [status, disallowStatus, restoreRuns, history] = await Promise.all([
       FTApi.checkAllowListStatus(),
       FTApi.checkDisallowListStatus(),
       FTApi.getRestoreRuns(5),
+      testHistoryData ? Promise.resolve(testHistoryData) : FTApi.fetchTestHistory(),
     ]);
     allowListData = status;
+    testHistoryData = history;
 
     const totalOwned = Object.values(FILE_TEST_COUNTS).reduce((a, b) => a + b, 0);
     const onAllowCount = status.ownedOnAllow.length;
@@ -765,17 +879,20 @@ async function refreshAllowList() {
                 const strikes = t.Strikes || '0';
                 const dateAdded = t['Date Added'] ? timeAgo(t['Date Added']) : '';
                 return `
-                  <div class="flex items-center justify-between py-1.5 px-2 rounded hover:bg-yellow-50 border-b border-gray-100 last:border-0">
-                    <div class="min-w-0 mr-2">
-                      <div class="text-xs text-gray-700 truncate" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-                      <div class="text-xs text-gray-400">
-                        ${strikes !== '0' ? `<span class="text-yellow-600">Strikes: ${strikes}</span>` : ''}
-                        ${dateAdded ? `<span class="ml-1">Added ${dateAdded}</span>` : ''}
+                  <div class="py-1.5 px-2 rounded hover:bg-yellow-50 border-b border-gray-100 last:border-0">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="min-w-0">
+                        <div class="text-xs text-gray-700 truncate" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+                        <div class="text-xs text-gray-400">
+                          ${strikes !== '0' ? `<span class="text-yellow-600">Strikes: ${strikes}</span>` : ''}
+                          ${dateAdded ? `<span class="ml-1">Added ${dateAdded}</span>` : ''}
+                        </div>
                       </div>
+                      <button onclick="event.stopPropagation(); dispatchRestore('${escapeHtml(title)}')" class="shrink-0 px-2 py-0.5 text-xs text-yellow-700 hover:text-white hover:bg-yellow-600 border border-yellow-300 rounded transition-colors" title="Restore this test">
+                        Restore
+                      </button>
                     </div>
-                    <button onclick="event.stopPropagation(); dispatchRestore('${escapeHtml(title)}')" class="shrink-0 px-2 py-0.5 text-xs text-yellow-700 hover:text-white hover:bg-yellow-600 border border-yellow-300 rounded transition-colors" title="Restore this test">
-                      Restore
-                    </button>
+                    ${renderMiniTestHistory(title, history)}
                   </div>
                 `;
               }).join('')}
@@ -838,9 +955,9 @@ async function refreshAllowList() {
       `;
     }
 
-    // Test History panel — loads lazily after the rest of the card renders
-    const historyUpdated = testHistoryData?.lastUpdated
-      ? `<span class="text-xs text-gray-400 ml-1">(updated ${testHistoryData.lastUpdated})</span>`
+    // Test History panel
+    const historyUpdated = history?.lastUpdated
+      ? `<span class="text-xs text-gray-400 ml-1">(updated ${history.lastUpdated})</span>`
       : '';
     html += `
       <details class="group mt-1">
@@ -849,24 +966,14 @@ async function refreshAllowList() {
           ${historyUpdated}
           <span class="text-gray-400 text-xs ml-auto group-open:rotate-90 transition-transform">&#9654;</span>
         </summary>
-        <div class="mt-2" id="test-history-panel-content">
-          <div class="text-xs text-gray-400 italic py-2">Loading history&hellip;</div>
+        <div class="mt-2">
+          ${renderTestHistoryPanel(history)}
         </div>
       </details>
     `;
 
     html += '</div>';
     setHTML('#allowlist-content', html);
-
-    // Lazy-load history after card is painted
-    FTApi.fetchTestHistory().then((history) => {
-      testHistoryData = history;
-      const el = document.getElementById('test-history-panel-content');
-      if (el) el.innerHTML = renderTestHistoryPanel(history);
-    }).catch(() => {
-      const el = document.getElementById('test-history-panel-content');
-      if (el) el.innerHTML = '<div class="text-xs text-red-400 py-2">Could not load history</div>';
-    });
   } catch (err) {
     setHTML(
       '#allowlist-content',

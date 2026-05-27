@@ -248,6 +248,38 @@ jobs:
                 "$TODAY_DAILY" 2>/dev/null | head -1 || true)
             fi
 
+            # Fetch owned-test failure annotations from the failed run (once, reused for all transitions)
+            OWNED_FAILURE_DETAILS="[]"
+            if [ -n "$LATEST_FAIL_URL" ]; then
+              RUN_ID=$(echo "$LATEST_FAIL_URL" | grep -oE '[0-9]+$')
+              if [ -n "$RUN_ID" ]; then
+                echo "Fetching failure annotations for run $RUN_ID..."
+                JOBS_JSON=$(curl -sf \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/krogertechnology/esperanto/actions/runs/$RUN_ID/jobs?per_page=100" \
+                  || echo '{"jobs":[]}')
+                OWNED_FRAGS='["kroger-store-details","kroger-store-tests","modality-selector-ui"]'
+                while IFS= read -r JOB_ID; do
+                  [ -z "$JOB_ID" ] && continue
+                  ANNS=$(curl -sf \
+                    -H "Authorization: Bearer $GH_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    "https://api.github.com/repos/krogertechnology/esperanto/check-runs/$JOB_ID/annotations?per_page=50" \
+                    || echo '[]')
+                  MATCHED=$(echo "$ANNS" | jq --argjson frags "$OWNED_FRAGS" '[
+                    .[] | select(.annotation_level == "failure") |
+                    select(.path as $p | $frags[] | . as $f | $p | ascii_downcase | contains($f)) |
+                    {testFile: (.path | split("/") | last), message: (.message | if length > 400 then .[:400] + "…" else . end)}
+                  ]')
+                  if [ "$(echo "$MATCHED" | jq 'length')" -gt 0 ]; then
+                    OWNED_FAILURE_DETAILS=$(echo "[$OWNED_FAILURE_DETAILS, $MATCHED]" | jq 'flatten')
+                  fi
+                done < <(echo "$JOBS_JSON" | jq -r '.jobs[] | select(.conclusion == "failure") | .id')
+                echo "Owned failure annotations found: $(echo "$OWNED_FAILURE_DETAILS" | jq 'length')"
+              fi
+            fi
+
             # Build new transition entries
             NEW_TRANSITIONS="[]"
 
@@ -261,7 +293,10 @@ jobs:
                 --arg test "$title" \
                 --arg strikes "$STRIKES" \
                 --arg runUrl "${LATEST_FAIL_URL}" \
-                '{ date: $date, test: $test, from: "allowList", to: "quarantine", strikes: $strikes, runUrl: (if $runUrl == "" then null else $runUrl end) }')
+                --argjson failureDetails "$OWNED_FAILURE_DETAILS" \
+                '{ date: $date, test: $test, from: "allowList", to: "quarantine", strikes: $strikes,
+                   runUrl: (if $runUrl == "" then null else $runUrl end),
+                   failureDetails: (if ($failureDetails | length) > 0 then $failureDetails else null end) }')
               NEW_TRANSITIONS=$(echo "$NEW_TRANSITIONS" | jq --argjson e "$ENTRY" '. + [$e]')
             done < <(echo "$NEWLY_QUARANTINED" | jq -r '.[]')
 
@@ -279,7 +314,10 @@ jobs:
                 --arg test "$title" \
                 --arg strikes "$STRIKES" \
                 --arg runUrl "${LATEST_FAIL_URL}" \
-                '{ date: $date, test: $test, from: "unknown", to: "quarantine", strikes: $strikes, runUrl: (if $runUrl == "" then null else $runUrl end) }')
+                --argjson failureDetails "$OWNED_FAILURE_DETAILS" \
+                '{ date: $date, test: $test, from: "unknown", to: "quarantine", strikes: $strikes,
+                   runUrl: (if $runUrl == "" then null else $runUrl end),
+                   failureDetails: (if ($failureDetails | length) > 0 then $failureDetails else null end) }')
               NEW_TRANSITIONS=$(echo "$NEW_TRANSITIONS" | jq --argjson e "$ENTRY" '. + [$e]')
             done < <(echo "$NEWLY_ADDED_TO_QUARANTINE" | jq -r '.[]')
 
