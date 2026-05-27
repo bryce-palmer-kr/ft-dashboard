@@ -90,6 +90,228 @@ jobs:
           # Also write latest.json as a symlink-like pointer
           cp "data/daily-${TODAY}.json" data/latest.json
 
+      - name: Snapshot allowlist and quarantine per-test status
+        env:
+          GH_TOKEN: ${{ secrets.ESPERANTO_PAT }}
+        run: |
+          set -e
+          TODAY=$(date +%Y-%m-%d)
+          OWNER=krogertechnology
+          ALLOW_LIST=266
+          QUARANTINE_LIST=277
+          TEAM=lafingcow
+
+          # GraphQL query to fetch all project items with field values
+          QUERY='query($org: String!, $number: Int!, $cursor: String) {
+            organization(login: $org) {
+              projectV2(number: $number) {
+                items(first: 100, after: $cursor) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
+                    fieldValues(first: 20) {
+                      nodes {
+                        ... on ProjectV2ItemFieldTextValue {
+                          text
+                          field { ... on ProjectV2FieldCommon { name } }
+                        }
+                        ... on ProjectV2ItemFieldSingleSelectValue {
+                          name
+                          field { ... on ProjectV2FieldCommon { name } }
+                        }
+                        ... on ProjectV2ItemFieldDateValue {
+                          date
+                          field { ... on ProjectV2FieldCommon { name } }
+                        }
+                        ... on ProjectV2ItemFieldNumberValue {
+                          number
+                          field { ... on ProjectV2FieldCommon { name } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }'
+
+          fetch_project_items() {
+            local project_num=$1
+            local cursor=""
+            local all_items="[]"
+            local has_next="true"
+
+            while [ "$has_next" = "true" ]; do
+              if [ -z "$cursor" ]; then
+                result=$(gh api graphql -f query="$QUERY" -f org="$OWNER" -F number="$project_num" 2>/dev/null || echo '{"data":{"organization":{"projectV2":{"items":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}')
+              else
+                result=$(gh api graphql -f query="$QUERY" -f org="$OWNER" -F number="$project_num" -f cursor="$cursor" 2>/dev/null || echo '{"data":{"organization":{"projectV2":{"items":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}')
+              fi
+
+              nodes=$(echo "$result" | jq '.data.organization.projectV2.items.nodes')
+              all_items=$(echo "$all_items $nodes" | jq -s 'add')
+              has_next=$(echo "$result" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
+              cursor=$(echo "$result" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor')
+            done
+
+            echo "$all_items"
+          }
+
+          echo "Fetching allow list (Project #$ALLOW_LIST)..."
+          ALLOW_ITEMS=$(fetch_project_items $ALLOW_LIST)
+
+          echo "Fetching quarantine list (Project #$QUARANTINE_LIST)..."
+          QUARANTINE_ITEMS=$(fetch_project_items $QUARANTINE_LIST)
+
+          # Parse items into flat objects: extract Title, Team Name, Date Added, Strikes
+          parse_items() {
+            echo "$1" | jq '[
+              .[] |
+              {
+                title: (
+                  [.fieldValues.nodes[] | select(.field.name == "Title") | .text] | first // null
+                ),
+                teamName: (
+                  [.fieldValues.nodes[] | select(.field.name == "Team Name") | (.text // .name)] | first // null
+                ),
+                addedDate: (
+                  [.fieldValues.nodes[] | select(.field.name == "Date Added") | .date] | first // null
+                ),
+                strikes: (
+                  [.fieldValues.nodes[] | select(.field.name == "Strikes") | .number] | first // null
+                )
+              } |
+              select(.title != null)
+            ]'
+          }
+
+          ALLOW_PARSED=$(parse_items "$ALLOW_ITEMS")
+          QUARANTINE_PARSED=$(parse_items "$QUARANTINE_ITEMS")
+
+          # Filter to lafingcow team only
+          ALLOW_OWNED=$(echo "$ALLOW_PARSED" | jq --arg team "$TEAM" '[.[] | select((.teamName // "" | ascii_downcase) == $team)]')
+          QUARANTINE_OWNED=$(echo "$QUARANTINE_PARSED" | jq --arg team "$TEAM" '[.[] | select((.teamName // "" | ascii_downcase) == $team)]')
+
+          echo "Allow list owned: $(echo "$ALLOW_OWNED" | jq 'length')"
+          echo "Quarantine owned: $(echo "$QUARANTINE_OWNED" | jq 'length')"
+
+          # Write today's snapshot
+          jq -n \
+            --arg date "$TODAY" \
+            --argjson allowList "$ALLOW_OWNED" \
+            --argjson quarantine "$QUARANTINE_OWNED" \
+            '{ date: $date, allowList: $allowList, quarantine: $quarantine }' \
+            > "data/test-snapshot-${TODAY}.json"
+
+          echo "Snapshot written to data/test-snapshot-${TODAY}.json"
+
+          # Find previous snapshot to diff against
+          PREV_SNAPSHOT=$(ls data/test-snapshot-*.json 2>/dev/null | sort | tail -2 | head -1)
+
+          if [ -z "$PREV_SNAPSHOT" ] || [ "$PREV_SNAPSHOT" = "data/test-snapshot-${TODAY}.json" ]; then
+            echo "No previous snapshot found — initialising test-history.json with current state"
+            jq -n \
+              --arg date "$TODAY" \
+              '{ lastUpdated: $date, transitions: [] }' \
+              > data/test-history.json
+          else
+            echo "Diffing against $PREV_SNAPSHOT"
+
+            PREV_ALLOW=$(jq '[.[].title | ascii_downcase]' <(jq '.allowList' "$PREV_SNAPSHOT"))
+            PREV_QUARANTINE=$(jq '[.[].title | ascii_downcase]' <(jq '.quarantine' "$PREV_SNAPSHOT"))
+            CUR_ALLOW=$(echo "$ALLOW_OWNED" | jq '[.[].title | ascii_downcase]')
+            CUR_QUARANTINE=$(echo "$QUARANTINE_OWNED" | jq '[.[].title | ascii_downcase]')
+
+            # Tests newly added to quarantine (were on allow list, now on quarantine)
+            NEWLY_QUARANTINED=$(jq -n \
+              --argjson prev_allow "$PREV_ALLOW" \
+              --argjson cur_quarantine "$CUR_QUARANTINE" \
+              '[$cur_quarantine[] | select(. as $t | $prev_allow | index($t) != null)]')
+
+            # Tests restored to allowlist (were on quarantine, now on allow list)
+            NEWLY_RESTORED=$(jq -n \
+              --argjson prev_quarantine "$PREV_QUARANTINE" \
+              --argjson cur_allow "$CUR_ALLOW" \
+              '[$cur_allow[] | select(. as $t | $prev_quarantine | index($t) != null)]')
+
+            # Tests newly added to quarantine without being on allow list before
+            NEWLY_ADDED_TO_QUARANTINE=$(jq -n \
+              --argjson prev_quarantine "$PREV_QUARANTINE" \
+              --argjson cur_quarantine "$CUR_QUARANTINE" \
+              '[$cur_quarantine[] | select(. as $t | $prev_quarantine | index($t) == null)]')
+
+            # Detect the latest failed main-branch run URL for linking
+            TODAY_DAILY="data/daily-${TODAY}.json"
+            LATEST_FAIL_URL=""
+            if [ -f "$TODAY_DAILY" ]; then
+              LATEST_FAIL_URL=$(jq -r \
+                '.mainBranch.runs[] | select(.conclusion == "failure") | "https://github.com/krogertechnology/esperanto/actions/runs/\(.databaseId)"' \
+                "$TODAY_DAILY" 2>/dev/null | head -1 || true)
+            fi
+
+            # Build new transition entries
+            NEW_TRANSITIONS="[]"
+
+            # Add newly quarantined (from allowlist)
+            while IFS= read -r title; do
+              [ -z "$title" ] && continue
+              STRIKES=$(echo "$QUARANTINE_OWNED" | jq -r --arg t "$title" \
+                '.[] | select((.title | ascii_downcase) == $t) | .strikes // "unknown"')
+              ENTRY=$(jq -n \
+                --arg date "$TODAY" \
+                --arg test "$title" \
+                --arg strikes "$STRIKES" \
+                --arg runUrl "${LATEST_FAIL_URL}" \
+                '{ date: $date, test: $test, from: "allowList", to: "quarantine", strikes: $strikes, runUrl: (if $runUrl == "" then null else $runUrl end) }')
+              NEW_TRANSITIONS=$(echo "$NEW_TRANSITIONS" | jq --argjson e "$ENTRY" '. + [$e]')
+            done < <(echo "$NEWLY_QUARANTINED" | jq -r '.[]')
+
+            # Add newly added to quarantine (not previously on allowlist either)
+            while IFS= read -r title; do
+              [ -z "$title" ] && continue
+              # Skip if already covered by NEWLY_QUARANTINED
+              if echo "$NEWLY_QUARANTINED" | jq -e --arg t "$title" '. | index($t) != null' > /dev/null 2>&1; then
+                continue
+              fi
+              STRIKES=$(echo "$QUARANTINE_OWNED" | jq -r --arg t "$title" \
+                '.[] | select((.title | ascii_downcase) == $t) | .strikes // "unknown"')
+              ENTRY=$(jq -n \
+                --arg date "$TODAY" \
+                --arg test "$title" \
+                --arg strikes "$STRIKES" \
+                --arg runUrl "${LATEST_FAIL_URL}" \
+                '{ date: $date, test: $test, from: "unknown", to: "quarantine", strikes: $strikes, runUrl: (if $runUrl == "" then null else $runUrl end) }')
+              NEW_TRANSITIONS=$(echo "$NEW_TRANSITIONS" | jq --argjson e "$ENTRY" '. + [$e]')
+            done < <(echo "$NEWLY_ADDED_TO_QUARANTINE" | jq -r '.[]')
+
+            # Add newly restored
+            while IFS= read -r title; do
+              [ -z "$title" ] && continue
+              ENTRY=$(jq -n \
+                --arg date "$TODAY" \
+                --arg test "$title" \
+                '{ date: $date, test: $test, from: "quarantine", to: "allowList", strikes: null, runUrl: null }')
+              NEW_TRANSITIONS=$(echo "$NEW_TRANSITIONS" | jq --argjson e "$ENTRY" '. + [$e]')
+            done < <(echo "$NEWLY_RESTORED" | jq -r '.[]')
+
+            echo "New transitions detected: $(echo "$NEW_TRANSITIONS" | jq 'length')"
+
+            # Merge into existing test-history.json (or create fresh)
+            if [ -f "data/test-history.json" ]; then
+              EXISTING=$(jq '.transitions' data/test-history.json)
+              MERGED=$(jq -n --argjson e "$EXISTING" --argjson n "$NEW_TRANSITIONS" '$e + $n')
+            else
+              MERGED="$NEW_TRANSITIONS"
+            fi
+
+            jq -n \
+              --arg date "$TODAY" \
+              --argjson transitions "$MERGED" \
+              '{ lastUpdated: $date, transitions: $transitions }' \
+              > data/test-history.json
+
+            echo "test-history.json updated"
+          fi
+
       - name: Commit and push data
         run: |
           git config user.name "github-actions[bot]"

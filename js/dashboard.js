@@ -9,12 +9,60 @@ let lastRefresh = null;
 let summaryIssues = [];
 let allowListData = null;
 let prciFailedRuns = [];
+let testHistoryData = null;
 let countdownInterval = null;
 let refreshSecondsLeft = 0;
 const REFRESH_INTERVAL_S = 5 * 60;
 const GITHUB_BASE = 'https://github.com/krogertechnology/esperanto';
 const ALLOW_LIST_URL = 'https://github.com/orgs/krogertechnology/projects/266';
 const DEFAULT_ROWS = 5;
+
+// ── Fix Suggestion Rules ──
+
+const FIX_RULES = [
+  {
+    pattern: /timeout.*exceeded|waiting.*\d+ms|timed out|navigation timeout/i,
+    label: 'Timeout',
+    suggestion: 'Increase the test timeout or add an explicit wait for a stable condition.',
+    snippet: 'test.setTimeout(60_000);',
+  },
+  {
+    pattern: /locator.*resolved to|element.*not found|strict mode violation|getByTestId/i,
+    label: 'Selector changed',
+    suggestion: 'A data-testid or element selector may have changed in a recent PR.',
+    snippet: "// Verify: page.getByTestId('your-testid')",
+  },
+  {
+    pattern: /network|fetch failed|api.*error|status (500|503|502)|connection refused/i,
+    label: 'Missing mock',
+    suggestion: 'This API route may not be mocked. Add or update bulkMockEndpoints.',
+    snippet: "// In test setup:\nawait bulkMockEndpoints(page, [\n  { url: '/api/your-route', fixture: 'your-fixture.json' },\n]);",
+  },
+  {
+    pattern: /msal|redirect.*login|auth.*redirect|loginRedirect/i,
+    label: 'Auth redirect',
+    suggestion: 'MSAL is redirecting to login. Start the server with NODE_CONFIG_ENV=local-pipeline.',
+    snippet: 'NODE_CONFIG_ENV=local-pipeline yarn start',
+  },
+  {
+    pattern: /expected.*received|toEqual|toBe\(|assertion.*failed/i,
+    label: 'Assertion mismatch',
+    suggestion: 'The component output changed. Re-check the expected value or add a waitFor.',
+    snippet: "// Add before assertion:\nawait expect(page.getByTestId('element')).toBeVisible();",
+  },
+];
+
+function getSuggestedFix(failureMessage) {
+  if (!failureMessage) return null;
+  return FIX_RULES.find((r) => r.pattern.test(failureMessage)) || null;
+}
+
+function copySnippet(snippetId) {
+  const el = document.getElementById(snippetId);
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(() => showToast('Snippet copied', 'info'));
+}
+window.copySnippet = copySnippet;
 
 // ── DOM Helpers ──
 
@@ -108,23 +156,37 @@ function renderFailureDetails(details) {
     `;
   }
 
-  const items = details.failures.map((f) => `
-    <div class="py-2 border-b border-red-100 last:border-0">
-      <div class="flex items-start gap-2">
-        <span class="text-red-500 mt-0.5 shrink-0">&#10007;</span>
-        <div class="min-w-0">
-          <div class="font-medium text-sm text-gray-800 truncate" title="${f.testPath}">${f.testFile}</div>
-          <div class="text-xs text-gray-400 truncate" title="${f.testPath}">${f.testPath}</div>
-          ${f.message ? `
-            <details class="mt-1">
-              <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-700">Show error</summary>
-              <pre class="mt-1 text-xs text-red-700 bg-red-50 rounded p-2 whitespace-pre-wrap max-h-32 overflow-y-auto">${escapeHtml(f.message)}</pre>
-            </details>
-          ` : ''}
+  const items = details.failures.map((f) => {
+    const fix = getSuggestedFix(f.message);
+    const snippetId = fix ? `snip-${Math.random().toString(36).slice(2, 8)}` : null;
+    return `
+      <div class="py-2 border-b border-red-100 last:border-0">
+        <div class="flex items-start gap-2">
+          <span class="text-red-500 mt-0.5 shrink-0">&#10007;</span>
+          <div class="min-w-0 w-full">
+            <div class="font-medium text-sm text-gray-800 truncate" title="${f.testPath}">${f.testFile}</div>
+            <div class="text-xs text-gray-400 truncate" title="${f.testPath}">${f.testPath}</div>
+            ${f.message ? `
+              <details class="mt-1">
+                <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-700">Show error</summary>
+                <pre class="mt-1 text-xs text-red-700 bg-red-50 rounded p-2 whitespace-pre-wrap max-h-32 overflow-y-auto">${escapeHtml(f.message)}</pre>
+              </details>
+            ` : ''}
+            ${fix ? `
+              <div class="mt-1.5 p-2 bg-blue-50 border border-blue-100 rounded text-xs">
+                <div class="flex items-center justify-between gap-2 mb-1">
+                  <span class="font-medium text-blue-700">&#128161; Suggested fix: ${fix.label}</span>
+                  <button onclick="copySnippet('${snippetId}')" class="text-blue-500 hover:text-blue-700 text-xs shrink-0">Copy snippet</button>
+                </div>
+                <p class="text-blue-600 mb-1">${fix.suggestion}</p>
+                <code id="${snippetId}" class="block bg-white border border-blue-200 rounded px-2 py-1 text-blue-800 font-mono text-xs whitespace-pre-wrap">${escapeHtml(fix.snippet)}</code>
+              </div>
+            ` : ''}
+          </div>
         </div>
       </div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 
   // Deduplicate test file names for re-run grep string
   const uniqueFiles = [...new Set(details.failures.map((f) => f.testFile.replace(/\.func\.ts$/, '')))];
@@ -554,6 +616,68 @@ async function refreshLafingcowRuns() {
   }
 }
 
+// ── Test History ──
+
+function transitionBadge(state) {
+  const map = {
+    allowList: { cls: 'bg-green-100 text-green-800', label: 'Allow List' },
+    quarantine: { cls: 'bg-yellow-100 text-yellow-800', label: 'Quarantine' },
+    unknown: { cls: 'bg-gray-100 text-gray-600', label: 'Unknown' },
+  };
+  const s = map[state] || map.unknown;
+  return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${s.cls}">${s.label}</span>`;
+}
+
+function renderTestHistoryPanel(history) {
+  if (!history || history.transitions.length === 0) {
+    return `
+      <div class="text-xs text-gray-400 text-center py-3 italic">
+        No transitions recorded yet. History builds daily as CI collects snapshots.
+      </div>
+    `;
+  }
+
+  // Group by test name (most recent transitions first overall)
+  const byTest = new Map();
+  for (const tr of [...history.transitions].reverse()) {
+    const key = tr.test;
+    if (!byTest.has(key)) byTest.set(key, []);
+    byTest.get(key).push(tr);
+  }
+
+  return `
+    <div class="space-y-2 max-h-80 overflow-y-auto">
+      ${[...byTest.entries()].map(([testName, transitions]) => `
+        <div class="border border-gray-100 rounded-lg overflow-hidden">
+          <div class="px-3 py-2 bg-gray-50 border-b border-gray-100 flex items-center gap-2">
+            <span class="w-1.5 h-1.5 rounded-full ${transitions[0].to === 'quarantine' ? 'bg-yellow-400' : 'bg-green-400'} flex-shrink-0"></span>
+            <p class="text-xs font-medium text-gray-700 truncate flex-1" title="${escapeHtml(testName)}">${escapeHtml(testName)}</p>
+            <span class="text-xs text-gray-400 shrink-0">${transitions.length} event${transitions.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="divide-y divide-gray-50">
+            ${transitions.map((tr) => `
+              <div class="px-3 py-2 flex items-center gap-3 flex-wrap text-xs">
+                <span class="text-gray-400 shrink-0">${tr.date}</span>
+                <span class="flex items-center gap-1">
+                  ${transitionBadge(tr.from)}
+                  <span class="text-gray-400">→</span>
+                  ${transitionBadge(tr.to)}
+                </span>
+                ${tr.strikes != null && tr.strikes !== 'null' && tr.strikes !== 'unknown' ? `
+                  <span class="text-yellow-600 font-medium">&#9889; ${tr.strikes} strike${tr.strikes !== '1' ? 's' : ''}</span>
+                ` : ''}
+                ${tr.runUrl ? `
+                  <a href="${escapeHtml(tr.runUrl)}" target="_blank" class="text-blue-600 hover:underline ml-auto">View Run &#8599;</a>
+                ` : ''}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
 // ── Allow List Status ──
 
 async function refreshAllowList() {
@@ -714,8 +838,35 @@ async function refreshAllowList() {
       `;
     }
 
+    // Test History panel — loads lazily after the rest of the card renders
+    const historyUpdated = testHistoryData?.lastUpdated
+      ? `<span class="text-xs text-gray-400 ml-1">(updated ${testHistoryData.lastUpdated})</span>`
+      : '';
+    html += `
+      <details class="group mt-1">
+        <summary class="flex items-center gap-2 cursor-pointer hover:opacity-80 text-sm">
+          <span class="text-gray-500">&#128197; Test transition history</span>
+          ${historyUpdated}
+          <span class="text-gray-400 text-xs ml-auto group-open:rotate-90 transition-transform">&#9654;</span>
+        </summary>
+        <div class="mt-2" id="test-history-panel-content">
+          <div class="text-xs text-gray-400 italic py-2">Loading history&hellip;</div>
+        </div>
+      </details>
+    `;
+
     html += '</div>';
     setHTML('#allowlist-content', html);
+
+    // Lazy-load history after card is painted
+    FTApi.fetchTestHistory().then((history) => {
+      testHistoryData = history;
+      const el = document.getElementById('test-history-panel-content');
+      if (el) el.innerHTML = renderTestHistoryPanel(history);
+    }).catch(() => {
+      const el = document.getElementById('test-history-panel-content');
+      if (el) el.innerHTML = '<div class="text-xs text-red-400 py-2">Could not load history</div>';
+    });
   } catch (err) {
     setHTML(
       '#allowlist-content',

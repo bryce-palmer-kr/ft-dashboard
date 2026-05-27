@@ -421,6 +421,18 @@ async function getPRCIRuns(limit = 75) {
   }));
 }
 
+// ── Test History ──
+
+async function fetchTestHistory() {
+  try {
+    const res = await fetch('data/test-history.json');
+    if (!res.ok) return { lastUpdated: null, transitions: [] };
+    return res.json();
+  } catch {
+    return { lastUpdated: null, transitions: [] };
+  }
+}
+
 // ── Export ──
 
 window.FTApi = {
@@ -442,4 +454,5 @@ window.FTApi = {
   checkRunForOwnedFailures,
   getRunFailureDetails,
   getPRCIRuns,
+  fetchTestHistory,
 };
