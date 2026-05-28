@@ -425,9 +425,8 @@ async function getPRCIRuns(limit = 75) {
 
 async function fetchTestHistory() {
   try {
-    const res = await fetch('data/test-history.json');
-    if (!res.ok) return { lastUpdated: null, transitions: [] };
-    return res.json();
+    const data = await ghGet('/repos/bryce-palmer-kr/ft-dashboard/contents/data/test-history.json');
+    return JSON.parse(atob(data.content.replace(/\s/g, '')));
   } catch {
     return { lastUpdated: null, transitions: [] };
   }
